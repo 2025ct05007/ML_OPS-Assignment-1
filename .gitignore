@@ -1,0 +1,23 @@
+# Excluding the Python virtual environment
+.venv/
+
+# Excluding Python cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Excluding local MLflow experiment data
+mlruns/
+
+# Excluding local logs
+logs/
+*.log
+
+# Excluding environment variables and secrets
+.env
+.env.*
+
+# Excluding editor and operating-system files
+.vscode/
+.DS_Store
+Thumbs.db
