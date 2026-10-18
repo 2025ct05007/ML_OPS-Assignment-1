@@ -1,9 +1,11 @@
 from pathlib import Path
 import logging
+from collections import Counter
+from threading import Lock
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 
@@ -21,6 +23,11 @@ model_path = project_root / "models" / "heart_disease_pipeline.joblib"
 
 # Loading the trained preprocessing and modelling pipeline
 model = joblib.load(model_path)
+
+# Initializing thread-safe request and prediction counters
+metrics = Counter()
+metrics_lock = Lock()
+
 
 # Defining the expected patient input fields
 class PatientData(BaseModel):
@@ -42,15 +49,55 @@ class PatientData(BaseModel):
 # Initializing the FastAPI application
 app = FastAPI(
     title="Heart Disease Prediction API",
-    description="Predicting heart disease labels using a trained ML pipeline.",
-    version="1.0.0",
+    description=(
+        "Predict heart disease labels using a trained ML pipeline. "
+        "For educational use only; not a medical diagnosis."
+    ),
+    version="1.1.0",
 )
+
+
+# Recording incoming HTTP requests
+@app.middleware("http")
+async def record_request_metrics(request: Request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception:
+        with metrics_lock:
+            metrics["http_requests_total"] += 1
+            metrics["http_requests_5xx_total"] += 1
+        raise
+
+    with metrics_lock:
+        metrics["http_requests_total"] += 1
+
+        if response.status_code >= 500:
+            metrics["http_requests_5xx_total"] += 1
+        elif response.status_code >= 400:
+            metrics["http_requests_4xx_total"] += 1
+
+    return response
 
 
 @app.get("/health")
 def health_check():
     # Reporting the API health status
     return {"status": "healthy", "model_loaded": model is not None}
+
+
+@app.get("/metrics")
+def get_metrics():
+    # Returning a snapshot of API request and prediction counters
+    with metrics_lock:
+        return {
+            "http_requests_total": metrics["http_requests_total"],
+            "http_requests_4xx_total": metrics["http_requests_4xx_total"],
+            "http_requests_5xx_total": metrics["http_requests_5xx_total"],
+            "predictions_total": metrics["predictions_total"],
+            "predictions_positive_total": metrics["predictions_positive_total"],
+            "predictions_negative_total": metrics["predictions_negative_total"],
+            "prediction_errors_total": metrics["prediction_errors_total"],
+        }
 
 
 @app.post("/predict")
@@ -63,6 +110,15 @@ def predict_heart_disease(patient: PatientData):
         prediction = int(model.predict(patient_df)[0])
         probabilities = model.predict_proba(patient_df)[0]
         confidence = float(probabilities[prediction])
+
+        # Recording prediction outcomes
+        with metrics_lock:
+            metrics["predictions_total"] += 1
+
+            if prediction == 1:
+                metrics["predictions_positive_total"] += 1
+            else:
+                metrics["predictions_negative_total"] += 1
 
         # Recording the prediction request
         logger.info(
@@ -79,13 +135,14 @@ def predict_heart_disease(patient: PatientData):
                 else "Heart disease absent"
             ),
             "confidence": round(confidence, 4),
-            "disclaimer": (
-                "For educational use only; not a medical diagnosis."
-            ),
+            "disclaimer": "For educational use only; not a medical diagnosis.",
         }
 
     except Exception:
-        # Logging unexpected prediction errors without exposing internals
+        # Recording and logging unexpected prediction errors
+        with metrics_lock:
+            metrics["prediction_errors_total"] += 1
+
         logger.exception("Failed to process prediction request")
         raise HTTPException(
             status_code=500,
